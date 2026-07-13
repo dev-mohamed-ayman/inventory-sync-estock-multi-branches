@@ -65,14 +65,49 @@ try {
         throw "Failed to connect to SQL Server: $($_.Exception.Message)"
     }
 
-    # --- Load all products from all branches and sum quantities ---
-    Write-Log "Loading products from all branches..."
+    # --- Load all branches and their products ---
+    Write-Log "Loading branches and products..."
     
-    $ProductsHash = @{}
+    # --- Step 1: Identify Server Branch ---
+    Write-Log "Identifying server (main) branch..."
+    $ServerBranchQuery = @"
+SELECT TOP 1 branch_id FROM co_inf WHERE branch_id IS NOT NULL
+"@
+    $ServerBranchCmd = $Connection.CreateCommand()
+    $ServerBranchCmd.CommandText = $ServerBranchQuery
+    $ServerBranchId = $ServerBranchCmd.ExecuteScalar()
     
-    # First: Get products from Branches_Product_Amount
+    Write-Log "Server Branch ID: $ServerBranchId"
+
+    # --- Step 2: Load All Branches ---
+    Write-Log "Loading branches..."
+    $BranchesQuery = @"
+SELECT 
+    b.branch_id,
+    b.branch_code,
+    b.branch_name,
+    b.branch_address,
+    b.branch_tel,
+    b.branch_mobile,
+    b.active,
+    b.is_server,
+    b.barcode_name,
+    b.barcode_tel
+FROM Branches b
+"@
+    $BranchesCmd = $Connection.CreateCommand()
+    $BranchesCmd.CommandText = $BranchesQuery
+    $BranchesAdapter = New-Object System.Data.SqlClient.SqlDataAdapter($BranchesCmd)
+    $BranchesTable = New-Object System.Data.DataTable
+    [void]$BranchesAdapter.Fill($BranchesTable)
+    
+    Write-Log "Number Of Branches: $($BranchesTable.Rows.Count)"
+
+    # --- Step 3: Load Products Stock Per Branch ---
+    Write-Log "Loading branch products stock..."
     $BranchProductsQuery = @"
 SELECT 
+    bpa.branch_id,
     p.product_id,
     p.product_code AS code,
     p.product_name_ar AS name_ar,
@@ -83,8 +118,9 @@ SELECT
 FROM Products p
 INNER JOIN Branches_Product_Amount bpa ON p.product_id = bpa.product_id
 WHERE ISNULL(p.deleted, 'N') != 'Y'
-GROUP BY p.product_id, p.product_code, p.product_name_ar, 
+GROUP BY bpa.branch_id, p.product_id, p.product_code, p.product_name_ar, 
          p.product_name_en, p.sell_price, p.product_int_code
+HAVING SUM(CAST(bpa.amount AS FLOAT)) > 0
 "@
     $BranchProductsCmd = $Connection.CreateCommand()
     $BranchProductsCmd.CommandText = $BranchProductsQuery
@@ -92,41 +128,13 @@ GROUP BY p.product_id, p.product_code, p.product_name_ar,
     $BranchProductsTable = New-Object System.Data.DataTable
     [void]$BranchProductsAdapter.Fill($BranchProductsTable)
     
-    Write-Log "Loaded $($BranchProductsTable.Rows.Count) product entries from branches"
+    Write-Log "Branch product stock rows loaded: $($BranchProductsTable.Rows.Count)"
 
-    foreach ($Row in $BranchProductsTable.Rows) {
-        $ProductCode = if ($Row.code -ne [DBNull]::Value) { $Row.code.ToString().Trim() } else { "" }
-        if ([string]::IsNullOrWhiteSpace($ProductCode)) { continue }
-        
-        $Quantity = [int][Math]::Floor([double]$Row.quantity)
-        
-        if (-not $ProductsHash.ContainsKey($ProductCode)) {
-            $ProductNameAr = if ($Row.name_ar -ne [DBNull]::Value) { $Row.name_ar.ToString().Trim() } else { "" }
-            $ProductNameEn = if ($Row.name_en -ne [DBNull]::Value) { $Row.name_en.ToString().Trim() } else { "" }
-            if ([string]::IsNullOrWhiteSpace($ProductNameEn) -and [string]::IsNullOrWhiteSpace($ProductNameAr)) {
-                $ProductNameEn = "Product $ProductCode"
-            }
-            
-            $ProductsHash[$ProductCode] = @{
-                code = $ProductCode
-                price = [double]$Row.price
-                quantity = $Quantity
-                international_barcode = if ($Row.international_barcode -ne [DBNull]::Value) { $Row.international_barcode.ToString().Trim() } else { "" }
-            }
-            
-            if (-not [string]::IsNullOrWhiteSpace($ProductNameAr)) {
-                $ProductsHash[$ProductCode]["name_ar"] = $ProductNameAr
-            }
-            if (-not [string]::IsNullOrWhiteSpace($ProductNameEn)) {
-                $ProductsHash[$ProductCode]["name_en"] = $ProductNameEn
-            }
-        } else {
-            $ProductsHash[$ProductCode].quantity += $Quantity
-        }
-    }
-
-    # Second: Get products from Product_Amount (server branch) and add them
-    $ServerProductsQuery = @"
+    # --- Step 4: Load Server Branch Products Stock ---
+    $ServerProductsTable = New-Object System.Data.DataTable
+    if ($ServerBranchId -ne $null) {
+        Write-Log "Loading server branch products stock..."
+        $ServerProductsQuery = @"
 SELECT 
     p.product_id,
     p.product_code AS code,
@@ -140,83 +148,190 @@ INNER JOIN Product_Amount pa ON p.product_id = pa.product_id
 WHERE ISNULL(p.deleted, 'N') != 'Y'
 GROUP BY p.product_id, p.product_code, p.product_name_ar, 
          p.product_name_en, p.sell_price, p.product_int_code
+HAVING SUM(CAST(pa.amount AS FLOAT)) > 0
 "@
-    $ServerProductsCmd = $Connection.CreateCommand()
-    $ServerProductsCmd.CommandText = $ServerProductsQuery
-    $ServerProductsAdapter = New-Object System.Data.SqlClient.SqlDataAdapter($ServerProductsCmd)
-    $ServerProductsTable = New-Object System.Data.DataTable
-    [void]$ServerProductsAdapter.Fill($ServerProductsTable)
-    
-    Write-Log "Loaded $($ServerProductsTable.Rows.Count) product entries from server branch"
-
-    foreach ($Row in $ServerProductsTable.Rows) {
-        $ProductCode = if ($Row.code -ne [DBNull]::Value) { $Row.code.ToString().Trim() } else { "" }
-        if ([string]::IsNullOrWhiteSpace($ProductCode)) { continue }
+        $ServerProductsCmd = $Connection.CreateCommand()
+        $ServerProductsCmd.CommandText = $ServerProductsQuery
+        $ServerProductsAdapter = New-Object System.Data.SqlClient.SqlDataAdapter($ServerProductsCmd)
+        [void]$ServerProductsAdapter.Fill($ServerProductsTable)
         
-        $Quantity = [int][Math]::Floor([double]$Row.quantity)
-        
-        if (-not $ProductsHash.ContainsKey($ProductCode)) {
-            $ProductNameAr = if ($Row.name_ar -ne [DBNull]::Value) { $Row.name_ar.ToString().Trim() } else { "" }
-            $ProductNameEn = if ($Row.name_en -ne [DBNull]::Value) { $Row.name_en.ToString().Trim() } else { "" }
-            if ([string]::IsNullOrWhiteSpace($ProductNameEn) -and [string]::IsNullOrWhiteSpace($ProductNameAr)) {
-                $ProductNameEn = "Product $ProductCode"
-            }
-            
-            $ProductsHash[$ProductCode] = @{
-                code = $ProductCode
-                price = [double]$Row.price
-                quantity = $Quantity
-                international_barcode = if ($Row.international_barcode -ne [DBNull]::Value) { $Row.international_barcode.ToString().Trim() } else { "" }
-            }
-            
-            if (-not [string]::IsNullOrWhiteSpace($ProductNameAr)) {
-                $ProductsHash[$ProductCode]["name_ar"] = $ProductNameAr
-            }
-            if (-not [string]::IsNullOrWhiteSpace($ProductNameEn)) {
-                $ProductsHash[$ProductCode]["name_en"] = $ProductNameEn
-            }
-        } else {
-            $ProductsHash[$ProductCode].quantity += $Quantity
-        }
+        Write-Log "Server branch products with stock > 0: $($ServerProductsTable.Rows.Count)"
     }
 
-    $ProductsList = $ProductsHash.Values | Where-Object { $_.quantity -gt 0 }
-    Write-Log "Total products with stock > 0: $($ProductsList.Count)"
-
-    # --- Prepare and send to API ---
-    if ($ProductsList.Count -eq 0) {
-        Write-Log "No products with stock to sync."
-    } else {
-        Write-Log "Preparing data for API..."
+    # --- Step 5: Build Branch-Based Data Structure ---
+    Write-Log "Building branch-based data structure..."
+    function Build-ProductObject {
+        param($Row)
+        $ProductCode = if ($Row.code -ne [DBNull]::Value) { $Row.code.ToString().Trim() } else { "" }
+        $ProductNameAr = if ($Row.name_ar -ne [DBNull]::Value) { $Row.name_ar.ToString().Trim() } else { "" }
+        $ProductNameEn = if ($Row.name_en -ne [DBNull]::Value) { $Row.name_en.ToString().Trim() } else { "" }
+        if ([string]::IsNullOrWhiteSpace($ProductCode)) {
+            return $null
+        }
+        $Product = @{
+            code = $ProductCode
+            price = [double]$Row.price
+            quantity = [int][Math]::Floor([double]$Row.quantity)
+            international_barcode = if ($Row.international_barcode -ne [DBNull]::Value) { $Row.international_barcode.ToString().Trim() } else { "" }
+            image = ""
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ProductNameAr)) {
+            $Product["name_ar"] = $ProductNameAr
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ProductNameEn)) {
+            $Product["name_en"] = $ProductNameEn
+        }
+        if ([string]::IsNullOrWhiteSpace($ProductNameAr) -and [string]::IsNullOrWhiteSpace($ProductNameEn)) {
+            $Product["name_en"] = "Product " + $ProductCode
+        }
+        return $Product
+    }
+    $BranchProductsIndex = @{}
+    foreach ($Row in $BranchProductsTable.Rows) {
+        $BrId = [int]$Row.branch_id
+        $ProductObj = Build-ProductObject -Row $Row
+        if ($ProductObj -ne $null) {
+            if (-not $BranchProductsIndex.ContainsKey($BrId)) {
+                $BranchProductsIndex[$BrId] = New-Object System.Collections.Generic.List[Object]
+            }
+            $BranchProductsIndex[$BrId].Add($ProductObj)
+        }
+    }
+    $BranchesList = New-Object System.Collections.Generic.List[Object]
+    $TotalProductsCount = 0
+    foreach ($BranchRow in $BranchesTable.Rows) {
+        $BranchId = [int]$BranchRow.branch_id
+        $IsServerBranch = ($ServerBranchId -ne $null -and $BranchId -eq [int]$ServerBranchId)
+        $Products = New-Object System.Collections.Generic.List[Object]
+        if ($IsServerBranch) {
+            foreach ($Row in $ServerProductsTable.Rows) {
+                $ProductObj = Build-ProductObject -Row $Row
+                if ($ProductObj -ne $null) {
+                    $Products.Add($ProductObj)
+                }
+            }
+        }
+        if ($BranchProductsIndex.ContainsKey($BranchId)) {
+            foreach ($ProductObj in $BranchProductsIndex[$BranchId]) {
+                $Products.Add($ProductObj)
+            }
+        }
+        if ($Products.Count -eq 0) {
+            continue
+        }
+        $TotalProductsCount += $Products.Count
         
+        # Get and normalize active field
+        $RawActive = if ($BranchRow.active -ne [DBNull]::Value) { $BranchRow.active.ToString().Trim() } else { "" }
+        Write-Log "Branch '$($BranchRow.branch_name)' raw active value: '$RawActive'"
+        
+        $NormalizedActive = "Y"
+        if ($RawActive -eq "0" -or $RawActive -eq "N" -or $RawActive -eq "n" -or $RawActive -eq "False" -or $RawActive -eq "false") {
+            $NormalizedActive = "N"
+        } elseif ($RawActive -eq "1" -or $RawActive -eq "Y" -or $RawActive -eq "y" -or $RawActive -eq "True" -or $RawActive -eq "true" -or $RawActive -eq "") {
+            $NormalizedActive = "Y"
+        }
+        
+        $BranchObject = @{
+            branch_code  = if ($BranchRow.branch_code -ne [DBNull]::Value) { $BranchRow.branch_code.ToString().Trim() } else { "" }
+            branch_name  = if ($BranchRow.branch_name -ne [DBNull]::Value) { $BranchRow.branch_name.ToString().Trim() } else { "" }
+            branch_address = if ($BranchRow.branch_address -ne [DBNull]::Value) { $BranchRow.branch_address.ToString().Trim() } else { "" }
+            branch_tel   = if ($BranchRow.branch_tel -ne [DBNull]::Value) { $BranchRow.branch_tel.ToString().Trim() } else { "" }
+            branch_mobile = if ($BranchRow.branch_mobile -ne [DBNull]::Value) { $BranchRow.branch_mobile.ToString().Trim() } else { "" }
+            active       = $NormalizedActive
+            products     = $Products
+        }
+        $BranchesList.Add($BranchObject)
+        Write-Log "Branch '$($BranchObject.branch_name)' (Code: $($BranchObject.branch_code)): $($Products.Count) products (active: $NormalizedActive)"
+    }
+    Write-Log "Total branches with products: $($BranchesList.Count)"
+    Write-Log "Total products across all branches: $TotalProductsCount"
+
+    # --- Prepare and send to API (split into product chunks) ---
+    if ($BranchesList.Count -eq 0) {
+        Write-Log "No branches with products to sync."
+    } else {
         $Headers = @{
             "X-API-KEY" = $Config.apiKey
             "Content-Type" = "application/json"
         }
         
-        $PayloadObject = @{
-            products = $ProductsList
-        }
-        $Payload = $PayloadObject | ConvertTo-Json -Depth 10
-        $BodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+        $chunkSize = 1000
+        $totalSuccessfulChunks = 0
+        $totalFailedChunks = 0
         
-        try {
-            Write-Log "Sending data to API..."
-            $Response = Invoke-RestMethod -Uri $Config.apiUrl -Method Post -Headers $Headers -Body $BodyBytes -TimeoutSec $Config.requestTimeoutSeconds
+        foreach ($Branch in $BranchesList) {
+            $BranchName = $Branch.branch_name
+            Write-Log "Processing branch: $BranchName (total products: $($Branch.products.Count))"
             
-            Write-Log "SUCCESS: Data sent to API"
-            Write-Log "API Response: $($Response | ConvertTo-Json -Compress)"
-        } catch {
-            $StatusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            Write-Log "FAILED - HTTP Status Code: $StatusCode" -Level "ERROR"
-            Write-Log "API Error: $($_.Exception.Message)" -Level "ERROR"
-            
-            if ($_.Exception.Response) {
-                $Reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $ErrorResponse = $Reader.ReadToEnd()
-                Write-Log "API Error Response: $ErrorResponse" -Level "ERROR"
+            # Split products into chunks
+            $productChunks = @()
+            $currentChunk = @()
+            foreach ($product in $Branch.products) {
+                $currentChunk += $product
+                if ($currentChunk.Count -ge $chunkSize) {
+                    $productChunks += ,$currentChunk
+                    $currentChunk = @()
+                }
             }
+            if ($currentChunk.Count -gt 0) {
+                $productChunks += ,$currentChunk
+            }
+            
+            Write-Log "Branch '$BranchName' split into $($productChunks.Count) chunks"
+            
+            $branchSuccessfulChunks = 0
+            $branchFailedChunks = 0
+            
+            for ($i = 0; $i -lt $productChunks.Count; $i++) {
+                $chunkIndex = $i + 1
+                try {
+                    Write-Log "Preparing and sending chunk $chunkIndex/$($productChunks.Count) for branch: $BranchName"
+                    
+                    # Create branch copy with current chunk products
+                    $BranchChunk = @{
+                        branch_code = $Branch.branch_code
+                        branch_name = $Branch.branch_name
+                        branch_address = $Branch.branch_address
+                        branch_tel = $Branch.branch_tel
+                        branch_mobile = $Branch.branch_mobile
+                        active = $Branch.active
+                        products = $productChunks[$i]
+                    }
+                    
+                    $PayloadObject = @{
+                        branches = @($BranchChunk)
+                    }
+                    $Payload = $PayloadObject | ConvertTo-Json -Depth 10
+                    Write-Log "Payload for $BranchName (chunk $chunkIndex) - first 500 chars: $($Payload.Substring(0, [Math]::Min(500, $Payload.Length)))"
+                    $BodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+                    
+                    Write-Log "Sending chunk $chunkIndex for branch '$BranchName' to API..."
+                    $Response = Invoke-RestMethod -Uri $Config.apiUrl -Method Post -Headers $Headers -Body $BodyBytes -TimeoutSec $Config.requestTimeoutSeconds
+                    
+                    Write-Log "SUCCESS: Chunk $chunkIndex for branch '$BranchName' sent to API"
+                    Write-Log "API Response: $($Response | ConvertTo-Json -Compress)"
+                    $branchSuccessfulChunks++
+                    $totalSuccessfulChunks++
+                } catch {
+                    $StatusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                    Write-Log "FAILED - Chunk $chunkIndex for branch '$BranchName' - HTTP Status Code: $StatusCode" -Level "ERROR"
+                    Write-Log "API Error: $($_.Exception.Message)" -Level "ERROR"
+                    
+                    if ($_.Exception.Response) {
+                        $Reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                        $ErrorResponse = $Reader.ReadToEnd()
+                        Write-Log "API Error Response: $ErrorResponse" -Level "ERROR"
+                    }
+                    $branchFailedChunks++
+                    $totalFailedChunks++
+                }
+            }
+            
+            Write-Log "Branch '$BranchName' complete: $branchSuccessfulChunks chunks succeeded, $branchFailedChunks chunks failed."
         }
+        
+        Write-Log "Sync complete: $totalSuccessfulChunks chunks succeeded, $totalFailedChunks chunks failed."
     }
 
     $Connection.Close()
