@@ -233,16 +233,14 @@ HAVING SUM(CAST(pa.amount AS FLOAT)) > 0
         }
         
         $BranchObject = @{
-            branch_code  = if ($BranchRow.branch_code -ne [DBNull]::Value) { $BranchRow.branch_code.ToString().Trim() } else { "" }
-            branch_name  = if ($BranchRow.branch_name -ne [DBNull]::Value) { $BranchRow.branch_name.ToString().Trim() } else { "" }
-            branch_address = if ($BranchRow.branch_address -ne [DBNull]::Value) { $BranchRow.branch_address.ToString().Trim() } else { "" }
-            branch_tel   = if ($BranchRow.branch_tel -ne [DBNull]::Value) { $BranchRow.branch_tel.ToString().Trim() } else { "" }
-            branch_mobile = if ($BranchRow.branch_mobile -ne [DBNull]::Value) { $BranchRow.branch_mobile.ToString().Trim() } else { "" }
-            active       = $NormalizedActive
+            code  = if ($BranchRow.branch_code -ne [DBNull]::Value) { $BranchRow.branch_code.ToString().Trim() } else { "" }
+            name  = if ($BranchRow.branch_name -ne [DBNull]::Value) { $BranchRow.branch_name.ToString().Trim() } else { "" }
+            address = if ($BranchRow.branch_address -ne [DBNull]::Value) { $BranchRow.branch_address.ToString().Trim() } else { "" }
+            phone   = if ($BranchRow.branch_tel -ne [DBNull]::Value) { $BranchRow.branch_tel.ToString().Trim() } else { if ($BranchRow.branch_mobile -ne [DBNull]::Value) { $BranchRow.branch_mobile.ToString().Trim() } else { "" } }
             products     = $Products
         }
         $BranchesList.Add($BranchObject)
-        Write-Log "Branch '$($BranchObject.branch_name)' (Code: $($BranchObject.branch_code)): $($Products.Count) products (active: $NormalizedActive)"
+        Write-Log "Branch '$($BranchObject.name)' (Code: $($BranchObject.code)): $($Products.Count) products"
     }
     Write-Log "Total branches with products: $($BranchesList.Count)"
     Write-Log "Total products across all branches: $TotalProductsCount"
@@ -261,7 +259,7 @@ HAVING SUM(CAST(pa.amount AS FLOAT)) > 0
         $totalFailedChunks = 0
         
         foreach ($Branch in $BranchesList) {
-            $BranchName = $Branch.branch_name
+            $BranchName = $Branch.name
             Write-Log "Processing branch: $BranchName (total products: $($Branch.products.Count))"
             
             # Split products into chunks
@@ -290,12 +288,10 @@ HAVING SUM(CAST(pa.amount AS FLOAT)) > 0
                     
                     # Create branch copy with current chunk products
                     $BranchChunk = @{
-                        branch_code = $Branch.branch_code
-                        branch_name = $Branch.branch_name
-                        branch_address = $Branch.branch_address
-                        branch_tel = $Branch.branch_tel
-                        branch_mobile = $Branch.branch_mobile
-                        active = $Branch.active
+                        code = $Branch.code
+                        name = $Branch.name
+                        address = $Branch.address
+                        phone = $Branch.phone
                         products = $productChunks[$i]
                     }
                     
